@@ -3,25 +3,26 @@
 """
 xai_closedloop_pc.py
 
-PC 端视觉闭环：
-- 使用 panel_cls_full.pt + Grad-CAM（和 viewer_gradmap_judge.py 同款逻辑）
-- ROI 内：
-    * 自动模式：Grad-CAM 找一次热点目标像素 (u_target, v_target)，之后固定不再漂移
-    * 手动模式：你在 ROI 内点击一个点作为目标
-    * 根据 NORMAL / INVALID 自动提示激光颜色：
-        - NORMAL  -> RED 点，检测红色激光
-        - INVALID -> GREEN 点，检测绿色激光
-    * 激光点检测 → 计算误差 → 发送 step_yaw / step_pitch 给树莓派，让舵机一点一点追过去
+PC-side visual closed loop:
+- Use panel_cls_full.pt + Grad-CAM (same logic as viewer_gradmap_judge.py)
+- Inside ROI:
+    * Auto mode: Grad-CAM selects one hot target pixel (u_target, v_target) once and then keeps it fixed
+    * Manual mode: you click a point inside the ROI as the target
+    * Decide laser color automatically according to NORMAL / INVALID:
+        - NORMAL  -> RED dot, detect red laser
+        - INVALID -> GREEN dot, detect green laser
+    * Laser-spot detection → compute error → send step_yaw / step_pitch to Raspberry Pi,
+      so that the servos move towards the target step by step
 
-按键：
-    - ROI 阶段：
-        * 鼠标拖拽框选 ROI，按 's' 锁定并开始闭环
-        * 按 'q' 退出
-    - 闭环阶段：
-        * '1' = 自动模式（Grad-CAM 自动锁定目标点，一次锁定不再漂移）
-        * '2' = 手动模式（在 ROI 内点击设置目标点）
-        * 'r' = 解除对齐锁定（舵机可以重新调整，但自动模式的目标点仍保持）
-        * 'q' = 退出
+Hotkeys:
+    - ROI stage:
+        * Drag mouse to select ROI, press 's' to lock and start closed loop
+        * Press 'q' to quit
+    - Closed-loop stage:
+        * '1' = auto mode (Grad-CAM locks the target once and does not drift afterwards)
+        * '2' = manual mode (click inside ROI to set target point)
+        * 'r' = release lock (servos can adjust again, but the auto-mode target stays)
+        * 'q' = quit
 """
 
 import os
@@ -41,7 +42,7 @@ import torch.serialization
 from torch.nn.modules.container import Sequential
 from torch.nn import Conv2d, BatchNorm2d, Linear, Dropout2d, ReLU, MaxPool2d, AdaptiveAvgPool2d
 
-# ====== 反序列化安全白名单 ======
+# ====== Safe globals whitelist for deserialization ======
 torch.serialization.add_safe_globals([
     SmallCNN,
     ConvBNReLU,
@@ -55,7 +56,7 @@ torch.serialization.add_safe_globals([
     AdaptiveAvgPool2d,
 ])
 
-# 如果 panel_cls_full.pt 用的是 ResNet18Classifier，这里兜底兼容
+# Fallback compatibility in case panel_cls_full.pt uses ResNet18Classifier
 try:
     from model_def import ResNet18Classifier
     import sys
@@ -64,8 +65,8 @@ try:
 except Exception:
     pass
 
-# ====== 树莓派通信配置 ======
-PI_IP   = "10.172.153.228"   # 改成你的树莓派 IP
+# ====== Raspberry Pi communication config ======
+PI_IP   = "10.172.153.228"   # Change to your Raspberry Pi IP
 PI_PORT = 50000
 
 def send_pi_cmd(cmd: dict):
@@ -86,14 +87,14 @@ def send_pi_cmd(cmd: dict):
     finally:
         s.close()
 
-# ====== 一些 UI 小函数 ======
+# ====== Some small UI helpers ======
 def put_text(img, s, org, color=(0,255,0), scale=0.8, thick=2):
     cv2.putText(img, s, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
-# ====== ROI 选择器 ======
+# ====== ROI selector ======
 class ROISelector:
     def __init__(self, win):
         self.win=win
@@ -122,13 +123,13 @@ class ROISelector:
             x0,x1=sorted([self.x0,self.x1]); y0,y1=sorted([self.y0,self.y1])
             cv2.rectangle(vis,(x0,y0),(x1,y1),(0,200,255),1)
 
-# ====== Grad-CAM 类 ======
+# ====== Grad-CAM class ======
 class GradCAM:
     def __init__(self, model, target_layer_name):
         self.model = model.eval()
         self.target = self._get_module(model, target_layer_name)
         if self.target is None:
-            raise ValueError(f"找不到层: {target_layer_name}")
+            raise ValueError(f"Layer not found: {target_layer_name}")
         self.act=None
         self.grad=None
         self.fh = self.target.register_forward_hook(self._fh)
@@ -164,15 +165,15 @@ class GradCAM:
                             align_corners=False).squeeze(1)
         return self._norm(cam[0].cpu().numpy())
 
-# ====== 模型加载（和 viewer 一致） ======
+# ====== Model loading (same as viewer) ======
 MODEL_PATH = "panel_cls_full.pt"
 
 def load_full_model(device, path=MODEL_PATH):
     if not os.path.exists(path):
-        raise FileNotFoundError(f"未找到模型：{path}")
+        raise FileNotFoundError(f"Model not found: {path}")
     import torch.serialization
     from model_def import SmallCNN
-    # 兜底 ResNet18Classifier
+    # Fallback for ResNet18Classifier
     try:
         from model_def import ResNet18Classifier
         import sys
@@ -189,7 +190,8 @@ def load_full_model(device, path=MODEL_PATH):
     normalize   = getattr(model, "normalize",
                           {"mean":[0.485,0.456,0.406],
                            "std":[0.229,0.224,0.225]})
-    target_layer = getattr(model, "target_layer", "feat.3")  # 你的 SmallCNN 一般是 feat.3
+    # For your SmallCNN this is usually feat.3
+    target_layer = getattr(model, "target_layer", "feat.3")
     mean, std = normalize["mean"], normalize["std"]
     tfm = T.Compose([
         T.ToPILImage(),
@@ -206,7 +208,7 @@ def load_full_model(device, path=MODEL_PATH):
     }
     return model, tfm, cam, normal_idx, meta
 
-# ====== 激光点检测（红 / 绿） ======
+# ====== Laser-spot detection (red / green) ======
 def detect_laser_point(bgr_roi, color="red"):
     hsv = cv2.cvtColor(bgr_roi, cv2.COLOR_BGR2HSV)
     if color == "red":
@@ -228,7 +230,7 @@ def detect_laser_point(bgr_roi, color="red"):
     cy = int(M["m01"]/M["m00"])
     return (cx, cy)
 
-# ====== Grad-CAM 自动目标点 ======
+# ====== Grad-CAM automatic target point ======
 def gradcam_target_pixel(model, tfm, cam, device, roi_bgr,
                          normal_idx=0, normal_thr=0.6):
     Hroi, Wroi = roi_bgr.shape[:2]
@@ -280,16 +282,16 @@ def gradcam_target_pixel(model, tfm, cam, device, roi_bgr,
     prob_vec = np.array([best["p0"], best["p1"]], dtype=np.float32)
     return heat, (u,v), prob_vec, pred_idx, is_normal, best["scale"], best["p_top"]
 
-# ====== 主程序 ======
+# ====== Main ======
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tfm, cam, normal_idx, meta = load_full_model(device, MODEL_PATH)
-    print("[INFO] 模型加载成功:", meta)
+    print("[INFO] Model loaded:", meta)
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        raise RuntimeError("无法打开摄像头 0")
-    # 固定一下分辨率，防止 Mac 连续性摄像头乱跳
+        raise RuntimeError("Failed to open camera 0")
+    # Fix resolution to avoid macOS continuous-camera jitter
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT,1080)
 
@@ -297,25 +299,25 @@ def main():
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     selector = ROISelector(win)
 
-    # 模式：auto / manual
+    # Mode: auto / manual
     mode = "auto"
-    manual_target_uv = None   # 手动模式目标点 (u,v)
-    auto_target_uv   = None   # 自动模式第一次 Grad-CAM 锁定的目标点 (u,v) —— 后面不再改变
+    manual_target_uv = None   # Target (u,v) in manual mode
+    auto_target_uv   = None   # In auto mode, first Grad-CAM target (u,v); kept fixed afterwards
 
     roi_box = None  # (x0,y0,x1,y1)
 
     NORMAL_THR  = 0.60
-    PIX_ERR_THR = 10      # 对齐阈值（像素）
-    LOCK_FRAMES = 5       # 连续多少帧在阈值内就视为对齐锁定
+    PIX_ERR_THR = 10      # Pixel error threshold for alignment
+    LOCK_FRAMES = 5       # Number of consecutive frames within threshold to enter LOCKED state
 
-    INVERT_YAW   = -1     # 根据你舵机接线调
+    INVERT_YAW   = -1     # Adjust depending on servo wiring
     INVERT_PITCH = -1
 
-    # 闭环状态
+    # Closed-loop state
     stable_frames = 0
     locked_aim = False
 
-    # 鼠标回调：ROI + 手动目标点
+    # Mouse callback: ROI + manual target point
     def mouse_cb(event, x, y, flags, param):
         nonlocal manual_target_uv, roi_box, mode
         selector.on_mouse(event, x, y, flags, param)
@@ -324,12 +326,12 @@ def main():
                 x0,y0,x1,y1 = roi_box
                 if x0 <= x < x1 and y0 <= y < y1:
                     manual_target_uv = (x - x0, y - y0)
-                    print(f"[INFO] 手动目标点 = {manual_target_uv}")
+                    print(f"[INFO] Manual target = {manual_target_uv}")
     cv2.setMouseCallback(win, mouse_cb)
 
-    # -------- ROI 选择 --------
-    print("========== ROI 选择 ==========")
-    print("用鼠标拖动 ROI，按 s 开始，按 q 退出")
+    # -------- ROI selection --------
+    print("========== ROI selection ==========")
+    print("Drag ROI with mouse, press 's' to start, 'q' to quit")
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -345,18 +347,18 @@ def main():
             cap.release(); cv2.destroyAllWindows(); return
         if k == ord('s'):
             if selector.roi is None:
-                print("[WARN] 先拖动选一个 ROI 再按 s")
+                print("[WARN] Please drag to select an ROI before pressing 's'")
                 continue
             roi_box = selector.roi
             selector.locked = True
             print("[INFO] ROI locked:", roi_box)
             break
 
-    print("========== 闭环开始 ==========")
-    print("1 = 自动模式(Grad-CAM，第一次锁定目标点)")
-    print("2 = 手动模式(点击 ROI 设置目标点)")
-    print("r = 解除对齐锁定(重新调整)")
-    print("q = 退出")
+    print("========== Closed loop started ==========")
+    print("1 = auto mode (Grad-CAM, lock target once)")
+    print("2 = manual mode (click in ROI to set target)")
+    print("r = reset lock (re-align)")
+    print("q = quit")
 
     try:
         while True:
@@ -371,50 +373,50 @@ def main():
             if roi_bgr.size == 0:
                 print("[WARN] ROI size = 0"); continue
 
-            # 1) Grad-CAM + 分类
+            # 1) Grad-CAM + classification
             try:
                 heat, (u_auto,v_auto), prob, pred_idx, is_normal, scale_used, p_top = \
                     gradcam_target_pixel(model, tfm, cam, device, roi_bgr,
                                          normal_idx=normal_idx,
                                          normal_thr=NORMAL_THR)
             except Exception as e:
-                print("[ERR] gradcam 出错:", e)
+                print("[ERR] gradcam failed:", e)
                 traceback.print_exc()
                 continue
 
             cls_name = meta["class_names"][pred_idx] if "class_names" in meta else str(pred_idx)
 
-            # NORMAL / INVALID → 决定用红点还是绿点
+            # NORMAL / INVALID → choose red or green laser
             if is_normal:
                 laser_color = "red"
-                laser_hint = "NORMAL → 请使用 RED 激光点"
+                laser_hint = "NORMAL → please use RED laser"
             else:
                 laser_color = "green"
-                laser_hint = "INVALID → 请使用 GREEN 激光点"
+                laser_hint = "INVALID → please use GREEN laser"
 
-            # 2) 选择目标点：自动/手动
+            # 2) Choose target point: auto / manual
             if mode == "auto":
-                # ✅ 关键改动：自动模式下，只在 auto_target_uv 为空时，用一次 Grad-CAM 点
+                # In auto mode, only set auto_target_uv once when it is None
                 if auto_target_uv is None:
                     auto_target_uv = (u_auto, v_auto)
-                    print(f"[INFO] 自动模式锁定目标点: {auto_target_uv}")
+                    print(f"[INFO] Auto mode locked target: {auto_target_uv}")
                 u_t, v_t = auto_target_uv
             else:
                 if manual_target_uv is not None:
                     u_t, v_t = manual_target_uv
                 else:
-                    # 手动模式未点击时，用 Grad-CAM 点做占位
+                    # In manual mode before click, use Grad-CAM point as placeholder
                     u_t, v_t = (u_auto, v_auto)
 
-            # 3) 检测激光点
+            # 3) Detect laser spot
             laser_uv = detect_laser_point(roi_bgr, color=laser_color)
 
-            # 可视化 ROI + CAM
+            # Visualize ROI + CAM
             roi_vis = roi_bgr.copy()
             heat_u8 = (np.clip(heat,0,1)*255).astype(np.uint8)
             heat_color = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)
             roi_vis = cv2.addWeighted(roi_vis, 0.5, heat_color, 0.5, 0)
-            # 标出目标点（蓝）
+            # Draw target point (blue)
             cv2.circle(roi_vis, (int(u_t), int(v_t)), 6, (255,0,0), 2)
 
             status = ""
@@ -427,9 +429,9 @@ def main():
             else:
                 err_u = err_v = None
                 status = "Laser NOT detected"
-                stable_frames = 0  # 检测不到激光就不要累计
+                stable_frames = 0  # do not accumulate when no laser is detected
 
-            # 放回整帧（注意尺寸要对上）
+            # Put ROI back into full frame (make sure sizes match)
             vis = frame.copy()
             h_roi = y1 - y0
             w_roi = x1 - x0
@@ -438,7 +440,7 @@ def main():
             vis[y0:y1, x0:x1] = roi_vis
             cv2.rectangle(vis, (x0,y0), (x1,y1), (0,255,255), 2)
 
-            # 4) 舵机闭环控制 + 对齐锁定
+            # 4) Servo closed-loop control + alignment lock
             if laser_uv is not None and err_u is not None and err_v is not None:
                 if abs(err_u) <= PIX_ERR_THR and abs(err_v) <= PIX_ERR_THR:
                     stable_frames += 1
@@ -446,7 +448,7 @@ def main():
                     stable_frames = 0
                 if not locked_aim and stable_frames >= LOCK_FRAMES:
                     locked_aim = True
-                    print("[INFO] 目标对齐，进入 LOCKED 状态（停止闭环步进）")
+                    print("[INFO] Target aligned, entering LOCKED state (stop stepping)")
 
                 step_yaw = 0
                 step_pitch = 0
@@ -462,9 +464,9 @@ def main():
                     if step_pitch != 0:
                         send_pi_cmd({"cmd": "step_pitch", "dir": int(step_pitch)})
             else:
-                stable_frames = 0  # 丢失激光时不能累计
+                stable_frames = 0  # cannot accumulate when laser is lost
 
-            # 5) 状态文字
+            # 5) Status text
             lock_flag = "LOCKED" if locked_aim else "TRACKING"
             text1 = f"Mode={mode.upper()} | {lock_flag} | Pred={cls_name} P0={prob[0]:.2f} P1={prob[1]:.2f} thr={NORMAL_THR:.2f}"
             put_text(vis, text1, (10,30), (0,255,0) if is_normal else (0,0,255), 0.7,2)
@@ -480,20 +482,20 @@ def main():
             elif k == ord('1'):
                 mode = "auto"
                 manual_target_uv = None
-                auto_target_uv = None  # 重新用下一帧的 Grad-CAM 选新目标点
+                auto_target_uv = None  # next frame Grad-CAM will lock a new target
                 locked_aim = False
                 stable_frames = 0
-                print("[INFO] 切换到自动模式（下次 Grad-CAM 会重新锁定一个目标点）")
+                print("[INFO] Switched to auto mode (next Grad-CAM will lock a new target)")
             elif k == ord('2'):
                 mode = "manual"
                 manual_target_uv = None
                 locked_aim = False
                 stable_frames = 0
-                print("[INFO] 切换到手动模式，请在 ROI 内点击设置目标点")
+                print("[INFO] Switched to manual mode, please click inside ROI to set target")
             elif k == ord('r'):
                 locked_aim = False
                 stable_frames = 0
-                print("[INFO] 重置 LOCKED 状态，继续调节舵机（目标点不变）")
+                print("[INFO] Reset LOCKED state, continue adjusting servos (target unchanged)")
 
     finally:
         cap.release()
