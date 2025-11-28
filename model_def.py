@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ------- 你原来的定义，保留 -------
+# -------Define CNN-------
 class ConvBNReLU(nn.Module):
     def __init__(self, in_c, out_c, pool=False, drop=0.0):
         super().__init__()
@@ -28,7 +28,6 @@ class SmallCNN(nn.Module):
         )
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.fc  = nn.Linear(256, num_classes)
-        # 这些属性通常在训练时写入整模型；给默认值便于容错
         self.class_names = ["normal","network_failure"]
         self.normal_idx  = 0
         self.input_size  = 224
@@ -40,7 +39,7 @@ class SmallCNN(nn.Module):
         x = torch.flatten(x, 1)
         return self.fc(x)
 
-# ------- 新增：ResNet18Classifier -------
+# ------- New additions:ResNet18Classifier -------
 from torchvision import models
 
 class ResNet18Classifier(nn.Module):
@@ -54,7 +53,7 @@ class ResNet18Classifier(nn.Module):
         else:
             backbone = models.resnet18(weights=None)
 
-        # 与训练脚本一致：feat + gap + fc，方便 Grad-CAM 定位到最后一层卷积
+        # Consistent with the training script: Enables Grad-CAM to localize to the final convolutional layer.
         self.feat = nn.Sequential(
             backbone.conv1,
             backbone.bn1,
@@ -68,7 +67,7 @@ class ResNet18Classifier(nn.Module):
         self.gap = backbone.avgpool
         self.fc  = nn.Linear(backbone.fc.in_features, num_classes)
 
-        # 默认元信息（训练保存整模型时会覆盖）
+        # Default Metadata
         self.class_names = ["normal","network_failure"]
         self.normal_idx  = 0
         self.input_size  = 224
