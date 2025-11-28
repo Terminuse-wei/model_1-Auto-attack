@@ -3,13 +3,13 @@
 """
 servo_api_server.py
 
-树莓派端：
-- 监听 TCP 50000 端口
-- 接收来自 PC 的一行 JSON 命令
-- 调用 servo_api.ServoAPI 做“一点一点动”的步进控制 + 激光开火
-- 返回简单的 JSON 响应
+Raspberry Pi side:
+- Listen on TCP port 50000
+- Receive one line of JSON command from the PC
+- Call servo_api.ServoAPI to do step-wise motion control + laser firing
+- Return a simple JSON response
 
-配合 PC 端脚本使用的命令格式示例：
+Example command formats used together with the PC-side script:
     {"cmd": "step_yaw",   "dir": 1}
     {"cmd": "step_pitch", "dir": -1}
     {"cmd": "fire",       "duration_ms": 20}
@@ -27,7 +27,7 @@ PORT = 50000
 
 def handle_one_cmd(api: ServoAPI, cmd: dict):
     """
-    根据 JSON 命令调用对应的舵机/激光动作
+    Call the corresponding servo/laser action according to the JSON command.
     """
     c = cmd.get("cmd", "")
     if c == "step_yaw":
@@ -50,8 +50,8 @@ def handle_one_cmd(api: ServoAPI, cmd: dict):
 
 def main():
     api = ServoAPI()
-    print(f"[INFO] ServoAPI 初始化完成，中点停止 + 激光关闭")
-    print(f"[INFO] 监听 {HOST}:{PORT}，等待来自 PC 的连接...")
+    print(f"[INFO] ServoAPI initialized: servos at neutral + laser off")
+    print(f"[INFO] Listening on {HOST}:{PORT}, waiting for connections from PC...")
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -62,9 +62,10 @@ def main():
             while True:
                 conn, addr = s.accept()
                 with conn:
-                    # 简单的一问一答协议：PC 每次发一行 JSON，然后断开
-                    # 如果你以后需要长连接，可以改成循环读多行
-                    # 这里先保持简单
+                    # Very simple request-response protocol:
+                    # PC sends one line of JSON each time, then closes.
+                    # If you need persistent connections later, you can
+                    # change this to read multiple lines in a loop.
                     data = conn.recv(4096)
                     if not data:
                         continue
@@ -82,9 +83,9 @@ def main():
 
                     conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
         except KeyboardInterrupt:
-            print("\n[INFO] 收到 Ctrl+C，准备退出...")
+            print("\n[INFO] Caught Ctrl+C, exiting...")
         finally:
-            print("[INFO] 停止舵机 & 关闭 pigpio")
+            print("[INFO] Stopping servos & shutting down pigpio")
             api.close()
 
 if __name__ == "__main__":
